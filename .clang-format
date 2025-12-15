@@ -1,0 +1,7 @@
+---
+Language: Cpp
+BasedOnStyle: LLVM
+BreakBeforeBraces: Attach
+IndentWidth: 2
+ColumnLimit: 0
+---
