@@ -59,21 +59,34 @@ String sendCommand(const String &cmd, uint32_t wait_ms = 1000) {
   Serial.println(cmd);
 
   // レスポンスを待つ
-  delay(100);
-  String resp = Serial1.readString();
+  // Serial1.setTimeout(2000)が設定されているので、readString()は最大2秒待つ
+  delay(200); // コマンド送信後の待機時間を延長（100ms → 200ms）
 
-  // タイムアウトまで追加データを待つ
+  String resp = "";
   uint32_t start = millis();
+
+  // タイムアウトまでデータを待つ
   while (millis() - start < wait_ms) {
     if (Serial1.available()) {
-      resp += Serial1.readString();
-      delay(50);
+      // 1文字ずつ読み取ってリアルタイムで表示
+      while (Serial1.available()) {
+        char c = Serial1.read();
+        Serial.write(c); // リアルタイムで表示
+        resp += c;
+      }
+      // データを受信したら少し待って追加データを確認
+      delay(100);
     } else {
       delay(50);
-      if (!Serial1.available()) {
-        break;
-      }
     }
+  }
+
+  // 最後に残っているデータを読み取る
+  delay(100);
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    Serial.write(c);
+    resp += c;
   }
 
   if (resp.length() > 0) {
@@ -223,6 +236,12 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
+  // M-BUS接続時の干渉を避けるため、ES920LR3初期化前にSerial2を無効化
+  // ULSA M5BがSerial2を使用している場合、一時的に無効化する
+  Serial.println("Disabling Serial2 to avoid interference with ES920LR3 initialization");
+  Serial2.end(); // Serial2を無効化
+  delay(100);
+
   Serial.println("M5Stack Core2 + ES920LR3 LoRaWAN test");
 
   // LCD初期化とタイトル表示（最初に実行）
@@ -242,27 +261,91 @@ void setup() {
   Serial.println(TX_pin);
 
   // モジュールをリセットして設定モードに入る
-  // NG 102が返ってくる場合、モジュールがオペレーションモードに入っている可能性がある
-  // そのため、まずboot_pinをHIGHにして設定モードに入る
+  // NG 102エラー = オペレーションモードの送信待ち状態
+  // モジュールが設定モードに入れていないため、強制的に設定モードに入る
+  Serial.println("\n=== Initializing ES920LR3 Module ===");
+  Serial.println("Forcing module into configuration mode...");
+
+  // M-BUS接続時の干渉を確認
+  Serial.println("\n=== Checking GPIO pin states ===");
+  Serial.print("boot_pin (GPIO22) before setup: ");
+  pinMode(boot_pin, INPUT_PULLUP);
+  Serial.println(digitalRead(boot_pin) ? "HIGH" : "LOW");
+  Serial.print("reset_pin (GPIO19) before setup: ");
+  pinMode(reset_pin, INPUT_PULLUP);
+  Serial.println(digitalRead(reset_pin) ? "HIGH" : "LOW");
+
+  // boot_pinを確実に制御するため、まずINPUT_PULLUPからOUTPUTに変更
   pinMode(boot_pin, OUTPUT);
+  digitalWrite(boot_pin, LOW); // まずLOWに設定（確実に制御）
+  delay(50);
   digitalWrite(boot_pin, HIGH); // boot mode (設定モードに入る)
+  Serial.print("boot_pin set to HIGH, current state: ");
+  Serial.println(digitalRead(boot_pin) ? "HIGH" : "LOW");
+  delay(100); // boot_pin設定後の待機時間（重要）
+
+  // リセット実行
+  Serial.println("Performing reset...");
   LoRa_Reset();
 
+  // モジュールの起動を待つ（ULSA M5B接続時は起動に時間がかかる可能性）
+  // ES920LR3の仕様書によると、リセット後の起動に時間がかかる
+  Serial.println("Waiting for module to boot...");
+  delay(500); // リセット後の待機時間を延長（200ms → 500ms）
+
   // Serial1をGROVE PORT.A（GPIO32/33）に割り当ててES920LR3と通信
-  // firmware_updaterと同様に、リセット後にdelay(100)を入れてからシリアルを初期化
-  delay(100);
-  Serial1.end();
-  Serial1.setTimeout(50);
+  // ULSA M5BはSerial2を使用しているため、Serial1を使用
+  Serial1.end(); // 既存のシリアルポートを確実に終了
+  delay(50);     // シリアル終了後の待機時間
+
+  // タイムアウトを延長（モジュールの応答を待つため）
+  Serial1.setTimeout(2000); // 50ms → 2000msに延長
+
+  Serial.println("Initializing Serial1 (115200bps, 8N1)...");
   Serial1.begin(115200, SERIAL_8N1, RX_pin, TX_pin);
 
-  // firmware_updaterと同様に、begin()の後にdelay(100)を入れる
-  delay(100);
+  // シリアル初期化後の待機時間
+  delay(300); // シリアル初期化後の待機時間を延長
 
-  // 受信バッファをクリア（読み取った内容をシリアルモニターに出力）
+  // モジュール起動時のプロンプトを待つ
+  // ES920LR3は設定モードに入ると「Select Mode [1.terminal or 2.processor]」を表示
+  Serial.println("Waiting for module startup prompt...");
+  Serial.println("Expected: Select Mode [1.terminal or 2.processor]");
+  String startupPrompt = "";
+  uint32_t promptStart = millis();
+  const uint32_t promptTimeout = 3000; // 3秒でタイムアウト
+
+  while (millis() - promptStart < promptTimeout) {
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      Serial.write(c); // リアルタイムで表示
+      startupPrompt += c;
+
+      // 「Select Mode」が含まれていれば起動完了
+      if (startupPrompt.indexOf("Select Mode") >= 0 ||
+          startupPrompt.indexOf("select mode") >= 0 ||
+          startupPrompt.indexOf("SELECT MODE") >= 0) {
+        Serial.println("\n[OK] Module startup prompt received");
+        break;
+      }
+    }
+    delay(10);
+  }
+
+  if (startupPrompt.length() == 0) {
+    Serial.println("\n[WARNING] No startup prompt received");
+    Serial.println("Module may not be in configuration mode");
+  } else {
+    Serial.print("Startup prompt: ");
+    Serial.println(startupPrompt);
+  }
+
+  // 残りのバッファをクリア
+  delay(100);
   while (Serial1.available()) {
     int data = Serial1.read();
     if (data != -1) {
-      Serial.write(data); // デバッグ出力用
+      Serial.write(data);
     }
   }
 
@@ -270,13 +353,48 @@ void setup() {
   // 参考: ES920LR3仕様書 - モード選択
   Serial.println("\n=== Step 1: Enter Configuration Mode ===");
   Serial.println("Selecting processor mode (2)...");
+  Serial.print("boot_pin state: ");
+  Serial.println(digitalRead(boot_pin) ? "HIGH" : "LOW");
 
-  String modeResp = sendCommand("2", 1000);
+  // 「2」コマンドを複数回試行（モジュールが応答するまで）
+  String modeResp = "";
+  int retryCount = 0;
+  const int maxRetries = 5;
+
+  while (modeResp.length() == 0 && retryCount < maxRetries) {
+    retryCount++;
+    Serial.print("Attempt ");
+    Serial.print(retryCount);
+    Serial.print("/");
+    Serial.println(maxRetries);
+
+    // boot_pinがHIGHであることを確認
+    if (!digitalRead(boot_pin)) {
+      Serial.println("[WARNING] boot_pin is LOW, setting to HIGH");
+      digitalWrite(boot_pin, HIGH);
+      delay(100);
+    }
+
+    modeResp = sendCommand("2", 2000);
+
+    if (modeResp.length() == 0) {
+      Serial.println("[WARNING] No response, retrying...");
+      delay(500); // 再試行前の待機時間
+    }
+  }
 
   // 設定モードに入ったら、boot_pinをLOWに戻す（normal mode）
   if (modeResp.length() > 0) {
+    Serial.println("[OK] Module responded to '2' command");
+    Serial.print("Response: ");
+    Serial.println(modeResp);
     digitalWrite(boot_pin, LOW); // normal modeに戻す
     delay(100);
+  } else {
+    Serial.println("[ERROR] No response to '2' command after multiple attempts");
+    Serial.println("Module may be stuck in operation mode");
+    Serial.println("Try power cycling the module");
+    // boot_pinはHIGHのまま維持（設定モードに入るため）
   }
 
   delay(500);
