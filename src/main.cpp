@@ -3,8 +3,11 @@
 // @see https://ikkei.akiba.co.jp/ikkei_Electronics/M5LR3.html
 // #define RX_pin 13 // ES920LR3 TX 接続ピン
 // #define TX_pin 14 // ES920LR3 RX 接続ピン
-#define RX_pin 33 // LoRa UNIT via Grove
-#define TX_pin 32 // LoRa UNIT via Grove
+// GROVE PORT.A ピン定義
+// ESP32のRX_pin = ES920LR3のTXに接続
+// ESP32のTX_pin = ES920LR3のRXに接続
+#define RX_pin 33 // GROVE PORT.A RX (ESP32側) - ES920LR3のTXに接続
+#define TX_pin 32 // GROVE PORT.A TX (ESP32側) - ES920LR3のRXに接続
 
 int boot_pin = 22;
 int reset_pin = 19;
@@ -20,8 +23,8 @@ struct __attribute__((packed)) SensorData {
   // uint32_t unixmilli;      // Byte 8-11: 0-864000000
 };
 
-// firmware_updaterと同様にSerial2を直接使用
-// HardwareSerial lora(2); // 使用しない
+// Serial1をGROVE PORT.A（GPIO32/33）に割り当ててES920LR3と通信
+// Serial2はM-BUSで使用されているため、Serial1を使用
 
 // ---- ここに自分の LoRaWAN パラメータを入れる ----
 // すべて 16進数文字列 (大文字 or 小文字どちらでもOKなことが多い)
@@ -35,7 +38,7 @@ void LoRa_Reset() {
   digitalWrite(reset_pin, LOW); // NRST "L"
   delay(10);
   pinMode(reset_pin, INPUT); // NRST open
-  delay(100);
+  delay(1);                  // firmware_updaterと同様に1msに変更
 }
 
 // ES920LR3コマンド送信関数
@@ -43,31 +46,31 @@ void LoRa_Reset() {
 // m5core2_firmware_updaterのCommandWithResponseを参考に実装
 String sendCommand(const String &cmd, uint32_t wait_ms = 1000) {
   // 受信バッファをクリア
-  while (Serial.available()) {
-    Serial.read();
+  while (Serial1.available()) {
+    Serial1.read();
   }
 
   // コマンド送信（CR+LF付き）
-  Serial.print(cmd);
-  Serial.print("\r\n");
-  Serial.flush(); // 送信完了を待つ
+  Serial1.print(cmd);
+  Serial1.print("\r\n");
+  Serial1.flush(); // 送信完了を待つ
 
   Serial.print("[TX] ");
   Serial.println(cmd);
 
   // レスポンスを待つ
   delay(100);
-  String resp = Serial.readString();
+  String resp = Serial1.readString();
 
   // タイムアウトまで追加データを待つ
   uint32_t start = millis();
   while (millis() - start < wait_ms) {
-    if (Serial.available()) {
-      resp += Serial.readString();
+    if (Serial1.available()) {
+      resp += Serial1.readString();
       delay(50);
     } else {
       delay(50);
-      if (!Serial.available()) {
+      if (!Serial1.available()) {
         break;
       }
     }
@@ -164,9 +167,9 @@ bool waitForJoinOK(uint32_t timeout_ms = 30000) {
       lastPrint = millis();
     }
 
-    while (Serial.available()) {
-      char c = Serial.read();
-      Serial.write(c); // リアルタイムで表示
+    while (Serial1.available()) {
+      char c = Serial1.read();
+      Serial.write(c); // リアルタイムで表示（デバッグ出力）
       buf += c;
 
       // バッファが長くなりすぎないように制限
@@ -214,6 +217,8 @@ bool waitForJoinOK(uint32_t timeout_ms = 30000) {
 
 void setup() {
   auto cfg = M5.config();
+  // PORT.AのI2C機能を無効化（GPIO32/33をUARTとして使用するため）
+  cfg.external_rtc = false; // RTC機能を無効化（必要に応じて）
   M5.begin(cfg);
   Serial.begin(115200);
   delay(2000);
@@ -237,22 +242,27 @@ void setup() {
   Serial.println(TX_pin);
 
   // モジュールをリセットして設定モードに入る
+  // NG 102が返ってくる場合、モジュールがオペレーションモードに入っている可能性がある
+  // そのため、まずboot_pinをHIGHにして設定モードに入る
   pinMode(boot_pin, OUTPUT);
-  digitalWrite(boot_pin, LOW); // normal mode
+  digitalWrite(boot_pin, HIGH); // boot mode (設定モードに入る)
   LoRa_Reset();
 
-  // firmware_updaterと同様にSerial2を使用
-  Serial.setTimeout(50);
-  Serial.begin(115200, SERIAL_8N1, RX_pin, TX_pin);
+  // Serial1をGROVE PORT.A（GPIO32/33）に割り当ててES920LR3と通信
+  // firmware_updaterと同様に、リセット後にdelay(100)を入れてからシリアルを初期化
+  delay(100);
+  Serial1.end();
+  Serial1.setTimeout(50);
+  Serial1.begin(115200, SERIAL_8N1, RX_pin, TX_pin);
 
-  // シリアルポートが安定するまで待つ
-  delay(500);
+  // firmware_updaterと同様に、begin()の後にdelay(100)を入れる
+  delay(100);
 
   // 受信バッファをクリア（読み取った内容をシリアルモニターに出力）
-  while (Serial.available()) {
-    int data = Serial.read();
+  while (Serial1.available()) {
+    int data = Serial1.read();
     if (data != -1) {
-      Serial.write(data);
+      Serial.write(data); // デバッグ出力用
     }
   }
 
@@ -262,6 +272,12 @@ void setup() {
   Serial.println("Selecting processor mode (2)...");
 
   String modeResp = sendCommand("2", 1000);
+
+  // 設定モードに入ったら、boot_pinをLOWに戻す（normal mode）
+  if (modeResp.length() > 0) {
+    digitalWrite(boot_pin, LOW); // normal modeに戻す
+    delay(100);
+  }
 
   delay(500);
 
@@ -298,7 +314,7 @@ void setup() {
     Serial.println("Possible causes:");
     Serial.println("  1. Wiring issue: Check RX/TX connections");
     Serial.println("  2. Power issue: Ensure module is powered");
-    Serial.println("  3. Wrong pins: Verify GPIO13/14 connections");
+    Serial.println("  3. Wrong pins: Verify GPIO32/33 (GROVE PORT.A) connections");
     Serial.println("  4. Baud rate: Module might use different baud rate");
     Serial.println("  5. Module not ready: Try power cycling");
 
@@ -571,9 +587,9 @@ void loop() {
   // sensorData.unixmilli = millis() % 864000000UL; // 0-864000000 (ミリ秒、約10日間)
 
   // バイナリデータを送信（12バイト）
-  Serial.write((uint8_t *)&sensorData, sizeof(SensorData));
-  Serial.print("\r\n");
-  Serial.flush();
+  Serial1.write((uint8_t *)&sensorData, sizeof(SensorData));
+  Serial1.print("\r\n");
+  Serial1.flush();
   lastSendTime = millis(); // 送信時刻を更新
   sendCount++;
 
@@ -622,10 +638,10 @@ void loop() {
 
   delay(200);
   String response = "";
-  while (Serial.available()) {
-    char c = Serial.read();
+  while (Serial1.available()) {
+    char c = Serial1.read();
     response += c;
-    Serial.write(c);
+    Serial.write(c); // デバッグ出力用
   }
 
   SendResult result = checkSendSuccess(response);
@@ -661,9 +677,9 @@ void loop() {
   updateDisplay(sendCount, successCount, failCount, lastSuccess, elapsedMs);
 
   // Downlinkが来る場合に備えて、常に受信を少し捌く
-  while (Serial.available()) {
-    char c = Serial.read();
-    Serial.write(c);
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    Serial.write(c); // デバッグ出力用
   }
 
   delay(10);
