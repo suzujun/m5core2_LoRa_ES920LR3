@@ -28,9 +28,10 @@ struct __attribute__((packed)) SensorData {
 
 // ---- ここに自分の LoRaWAN パラメータを入れる ----
 // すべて 16進数文字列 (大文字 or 小文字どちらでもOKなことが多い)
-const char *DEV_EUI = "0100010002000700";                 // 例: メーカー提供 DevEUI
-const char *APP_EUI = "0100010001000100";                 // 例: 自分で決めた JoinEUI/AppEUI
-const char *APP_KEY = "010001000100010001000000FFFFFFFF"; // 例: 自分で生成した 128bit鍵
+// platformio.iniのbuild_flagsで設定必須
+#define DEV_EUI PDEV_EUI
+#define APP_EUI PAPP_EUI
+#define APP_KEY PAPP_KEY
 // --------------------------------------------------
 
 void LoRa_Reset() {
