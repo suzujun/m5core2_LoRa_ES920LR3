@@ -1,3 +1,4 @@
+#include "secrets.h"
 #include <M5Unified.h>
 
 // @see https://ikkei.akiba.co.jp/ikkei_Electronics/M5LR3.html
@@ -25,14 +26,6 @@ struct __attribute__((packed)) SensorData {
 
 // Serial1をGROVE PORT.A（GPIO32/33）に割り当ててES920LR3と通信
 // Serial2はM-BUSで使用されているため、Serial1を使用
-
-// ---- ここに自分の LoRaWAN パラメータを入れる ----
-// すべて 16進数文字列 (大文字 or 小文字どちらでもOKなことが多い)
-// platformio.iniのbuild_flagsで設定必須
-#define DEV_EUI PDEV_EUI
-#define APP_EUI PAPP_EUI
-#define APP_KEY PAPP_KEY
-// --------------------------------------------------
 
 void LoRa_Reset() {
   pinMode(reset_pin, OUTPUT);

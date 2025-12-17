@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# LoRaWAN認証情報（機密情報のためコミットしない）
+include/secrets.h
