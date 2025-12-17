@@ -41,52 +41,137 @@ void LoRa_Reset() {
   delay(1);                  // firmware_updaterと同様に1msに変更
 }
 
-// ES920LR3コマンド送信関数
+// ES920LR3コマンド送信関数（M-BUS接続時の干渉対策）
 // 参考: ES920LR3_LoRaWAN_コマンド仕様ソフトウェア説明書_1.01.pdf
-// m5core2_firmware_updaterのCommandWithResponseを参考に実装
-String sendCommand(const String &cmd, uint32_t wait_ms = 1000) {
-  // 受信バッファをクリア
-  while (Serial1.available()) {
-    Serial1.read();
-  }
-
-  // コマンド送信（CR+LF付き）
-  Serial1.print(cmd);
-  Serial1.print("\r\n");
-  Serial1.flush(); // 送信完了を待つ
-
-  Serial.print("[TX] ");
-  Serial.println(cmd);
-
-  // レスポンスを待つ
-  // Serial1.setTimeout(2000)が設定されているので、readString()は最大2秒待つ
-  delay(200); // コマンド送信後の待機時間を延長（100ms → 200ms）
-
+// M-BUS接続時はSerial2が動作しているため、Serial2の受信バッファもクリア
+// NG 102エラー時は自動的にリトライする
+String sendCommand(const String &cmd, uint32_t wait_ms = 1000, int maxRetries = 10) {
   String resp = "";
-  uint32_t start = millis();
+  int retryCount = 0;
 
-  // タイムアウトまでデータを待つ
-  while (millis() - start < wait_ms) {
-    if (Serial1.available()) {
-      // 1文字ずつ読み取ってリアルタイムで表示
-      while (Serial1.available()) {
-        char c = Serial1.read();
-        Serial.write(c); // リアルタイムで表示
-        resp += c;
-      }
-      // データを受信したら少し待って追加データを確認
-      delay(100);
-    } else {
-      delay(50);
+  while (retryCount <= maxRetries) {
+    if (retryCount > 0) {
+      Serial.print("[RETRY] Attempt ");
+      Serial.print(retryCount + 1);
+      Serial.print("/");
+      Serial.println(maxRetries + 1);
     }
-  }
 
-  // 最後に残っているデータを読み取る
-  delay(100);
-  while (Serial1.available()) {
-    char c = Serial1.read();
-    Serial.write(c);
-    resp += c;
+    // Serial1の受信バッファをクリア
+    while (Serial1.available()) {
+      Serial1.read();
+    }
+
+    // M-BUS接続時の干渉を避けるため、Serial2の受信バッファもクリア
+    while (Serial2.available()) {
+      Serial2.read(); // Serial2の受信バッファをクリア（ULSA M5Bからのデータを破棄）
+    }
+
+    // コマンド送信（CR+LF付き）
+    Serial1.print(cmd);
+    Serial1.print("\r\n");
+    Serial1.flush(); // 送信完了を待つ
+
+    if (retryCount == 0) {
+      Serial.print("[TX] ");
+      Serial.println(cmd);
+    }
+
+    // レスポンスを待つ
+    delay(200); // コマンド送信後の待機時間
+
+    resp = "";
+    uint32_t start = millis();
+
+    // タイムアウトまでデータを待つ
+    while (millis() - start < wait_ms) {
+      // Serial1からの応答を確認
+      if (Serial1.available()) {
+        // 1文字ずつ読み取ってリアルタイムで表示
+        while (Serial1.available()) {
+          char c = Serial1.read();
+          if (retryCount == 0) {
+            Serial.write(c); // リアルタイムで表示（初回のみ）
+          }
+          resp += c;
+        }
+        // データを受信したら少し待って追加データを確認
+        delay(100);
+      } else {
+        // M-BUS接続時はSerial2の受信バッファも定期的にクリア
+        // Serial2からのデータがSerial1の応答と混在するのを防ぐ
+        if (Serial2.available()) {
+          // Serial2の受信バッファをクリア（ULSA M5Bからのデータを破棄）
+          while (Serial2.available()) {
+            Serial2.read();
+          }
+        }
+        delay(50);
+      }
+    }
+
+    // 最後に残っているデータを読み取る
+    delay(100);
+    while (Serial1.available()) {
+      char c = Serial1.read();
+      if (retryCount == 0) {
+        Serial.write(c);
+      }
+      resp += c;
+    }
+
+    // M-BUS接続時はSerial2の受信バッファも最終的にクリア
+    while (Serial2.available()) {
+      Serial2.read();
+    }
+
+    // NG 102エラーのチェック
+    if (resp.length() > 0) {
+      String upperResp = resp;
+      upperResp.toUpperCase();
+
+      if (upperResp.indexOf("NG 102") >= 0 || upperResp.indexOf("NG102") >= 0) {
+        // NG 102エラーの場合、モジュールが準備できるまで待機してリトライ
+        if (retryCount < maxRetries) {
+          Serial.print("[NG 102] Module busy, waiting ");
+          uint32_t waitStart = millis();
+          const uint32_t maxWaitTime = 3000; // 最大3秒待機
+          bool moduleReady = false;
+
+          while (millis() - waitStart < maxWaitTime && !moduleReady) {
+            delay(300); // ポーリング間隔
+            if (!Serial1.available()) {
+              delay(200); // 短い時間バッファが空であることを確認
+              if (!Serial1.available()) {
+                moduleReady = true; // 準備完了と判断
+              }
+            }
+          }
+
+          Serial.print((millis() - waitStart));
+          Serial.println("ms before retry");
+          retryCount++;
+          continue; // リトライ
+        } else {
+          // 最大リトライ回数に達した場合
+          Serial.println("[ERROR] NG 102 after max retries");
+          break;
+        }
+      } else {
+        // NG 102以外の応答の場合、成功または他のエラー
+        break; // ループを抜ける
+      }
+    } else {
+      // 応答がない場合
+      if (retryCount < maxRetries) {
+        Serial.println("[WARNING] No response, retrying...");
+        delay(500);
+        retryCount++;
+        continue;
+      } else {
+        break;
+      }
+    }
   }
 
   if (resp.length() > 0) {
@@ -180,6 +265,7 @@ bool waitForJoinOK(uint32_t timeout_ms = 30000) {
       lastPrint = millis();
     }
 
+    // Serial1からのJOIN応答を確認
     while (Serial1.available()) {
       char c = Serial1.read();
       Serial.write(c); // リアルタイムで表示（デバッグ出力）
@@ -188,6 +274,15 @@ bool waitForJoinOK(uint32_t timeout_ms = 30000) {
       // バッファが長くなりすぎないように制限
       if (buf.length() > 200) {
         buf = buf.substring(buf.length() - 100);
+      }
+    }
+
+    // M-BUS接続時の干渉を避けるため、Serial2の受信バッファも定期的にクリア
+    // Serial2からのデータがSerial1のJOIN応答と混在するのを防ぐ
+    if (Serial2.available()) {
+      // Serial2の受信バッファをクリア（ULSA M5Bからのデータを破棄）
+      while (Serial2.available()) {
+        Serial2.read();
       }
     }
 
@@ -236,11 +331,26 @@ void setup() {
   Serial.begin(115200);
   delay(2000);
 
-  // M-BUS接続時の干渉を避けるため、ES920LR3初期化前にSerial2を無効化
-  // ULSA M5BがSerial2を使用している場合、一時的に無効化する
-  Serial.println("Disabling Serial2 to avoid interference with ES920LR3 initialization");
-  Serial2.end(); // Serial2を無効化
-  delay(100);
+  // M-BUS接続時の干渉対策
+  // ULSA M5BがSerial2を使用している場合、Serial2の受信バッファをクリア
+  // Serial2を無効化するとULSA M5Bが動作しなくなるため、バッファクリアのみ実施
+  Serial.println("Checking Serial2 status for M-BUS interference...");
+
+  // Serial2が既に初期化されているか確認（ULSA M5Bが初期化している可能性）
+  // ESP32では、Serial2がbegin()されていない場合、available()を呼び出すと未定義動作になる可能性がある
+  // そのため、Serial2を明示的に初期化するか、初期化状態を追跡する必要がある
+
+  // M-BUS接続時はULSA M5BがSerial2を使用しているため、Serial2を初期化
+  // GPIO13/14を使用（ULSA M5Bと同じ設定）
+  Serial.println("Initializing Serial2 for M-BUS (ULSA M5B)...");
+  Serial2.begin(115200, SERIAL_8N1, 13, 14);
+
+  // Serial2の受信バッファをクリア（ULSA M5Bからのデータを破棄）
+  delay(50); // Serial2初期化後の待機時間
+  while (Serial2.available()) {
+    Serial2.read();
+  }
+  Serial.println("Serial2 initialized and buffer cleared");
 
   Serial.println("M5Stack Core2 + ES920LR3 LoRaWAN test");
 
@@ -580,7 +690,7 @@ void setup() {
   Serial.println("Start command OK. Waiting for Join response...");
 
   // Join 完了待ち（モジュールの応答メッセージは仕様書に合わせてパターンを書き換え）
-  bool joined = waitForJoinOK(30 * 60 * 1000);
+  bool joined = waitForJoinOK(60 * 60 * 1000);
   if (!joined) {
     Serial.println("Join failed. Stop here.");
     M5.Display.setCursor(10, 90);
